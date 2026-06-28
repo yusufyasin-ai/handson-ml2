@@ -1,0 +1,29 @@
+# Regulatory sources to monitor.
+# Each entry is fetched by src/fetch.py on every run.
+#
+# Fields:
+#   name        – human label, used in log context
+#   url         – feed or page URL
+#   type        – rss | atom | html | json-api
+#   enabled     – set to false to skip without deleting the entry
+#   tags        – list of topic labels passed to the classifier
+#   notes       – free-form comment for operators
+
+sources:
+  - name: "SEC Edgar Latest Filings"
+    url: "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=&dateb=&owner=include&count=40&search_text=&output=atom"
+    type: atom
+    enabled: true
+    tags: [securities, disclosure, us]
+
+  - name: "Federal Register (Proposed Rules)"
+    url: "https://www.federalregister.gov/api/v1/documents.json?conditions[type][]=PROPOSED_RULE&order=newest"
+    type: json-api
+    enabled: true
+    tags: [federal, rulemaking, us]
+
+  - name: "ESMA Latest News"
+    url: "https://www.esma.europa.eu/press-news/esma-news/rss"
+    type: rss
+    enabled: true
+    tags: [securities, eu, markets]
