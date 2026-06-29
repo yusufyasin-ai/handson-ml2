@@ -6,6 +6,12 @@ drive BeautifulSoup. A liveness check gates every source: if the parsed
 item count is below min_items we emit SOURCE_FAILURE/critical and exclude
 the source from the run. A silent empty parse is never reported as clean.
 
+Fixture support: when a source sets fixture_path, the local HTML file is read
+instead of making a network request. The same parser and liveness check run
+identically — a fixture that yields zero items fires SOURCE_FAILURE just as a
+live source would. The canonical url is still used as the base URL for
+resolving relative links inside the fixture.
+
 State lives in state/<slug>.json as a list of short SHA-256 hashes (title+link).
 Per-source isolation means a new source starts fresh without touching others.
 """
@@ -101,41 +107,71 @@ def _extract_field(row, field_cfg: dict, base_url: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# HTML acquisition (live vs fixture)
+# ---------------------------------------------------------------------------
+
+def _get_html(source: dict) -> tuple[str, bool]:
+    """Acquire raw HTML for a source. Returns (html_text, is_fixture).
+
+    Raises OSError for fixture read failures, requests.RequestException for
+    live fetch failures — the caller logs SOURCE_FAILURE and returns early.
+    """
+    fixture_rel = source.get("fixture_path", "")
+    if fixture_rel:
+        path = (_ROOT / fixture_rel).resolve()
+        return path.read_text(encoding="utf-8"), True
+
+    resp = requests.get(source["url"], headers=_HEADERS, timeout=_DEFAULT_TIMEOUT)
+    resp.raise_for_status()
+    return resp.text, False
+
+
+# ---------------------------------------------------------------------------
 # Single-source fetch + parse
 # ---------------------------------------------------------------------------
 
-def _fetch_source(source: dict) -> tuple[list[dict], bool]:
-    """Fetch and parse one source. Returns (items, liveness_ok).
+def _fetch_source(source: dict) -> tuple[list[dict], bool, bool]:
+    """Fetch and parse one source. Returns (items, liveness_ok, is_fixture).
 
-    liveness_ok is False when the HTTP request fails OR when the parsed
-    count is below min_items. In either case SOURCE_FAILURE is already logged.
+    liveness_ok is False when acquisition fails OR when the parsed count is
+    below min_items. SOURCE_FAILURE is logged in both cases. The liveness
+    check is identical regardless of whether the source is live or a fixture.
     """
     name = source["name"]
-    url = source["url"]
+    url = source.get("url", "")
     parser = source.get("parser", {})
     min_items: int = source.get("liveness", {}).get("min_items", _DEFAULT_MIN_ITEMS)
     slug = _slug_from_source(source)
 
-    # --- HTTP fetch ---
+    # --- Acquire HTML ---
     try:
-        resp = requests.get(url, headers=_HEADERS, timeout=_DEFAULT_TIMEOUT)
-        resp.raise_for_status()
+        html_text, is_fixture = _get_html(source)
+    except OSError as exc:
+        fixture_path = source.get("fixture_path", "")
+        log_event(
+            SOURCE_FAILURE, CRITICAL, COMPONENT,
+            f"Cannot read fixture for {name}: {exc}",
+            {"source": name, "fixture_path": fixture_path},
+        )
+        return [], False, True
     except requests.Timeout:
         log_event(
             SOURCE_FAILURE, CRITICAL, COMPONENT,
             f"Timeout fetching {name} after {_DEFAULT_TIMEOUT}s",
             {"source": name, "url": url},
         )
-        return [], False
+        return [], False, False
     except requests.RequestException as exc:
         log_event(
             SOURCE_FAILURE, CRITICAL, COMPONENT,
             f"HTTP error fetching {name}: {exc}",
             {"source": name, "url": url, "error": str(exc)},
         )
-        return [], False
+        return [], False, False
 
-    # --- Parse ---
+    source_label = f"fixture:{source.get('fixture_path', '')}" if is_fixture else url
+
+    # --- Validate selector config ---
     item_selector = parser.get("item_selector", "")
     fields_cfg = parser.get("fields", {})
 
@@ -145,19 +181,24 @@ def _fetch_source(source: dict) -> tuple[list[dict], bool]:
             f"item_selector not configured for {name} — skipping",
             {"source": name},
         )
-        return [], False
+        return [], False, is_fixture
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+    # --- Parse (identical for live and fixture) ---
+    soup = BeautifulSoup(html_text, "html.parser")
     rows = soup.select(item_selector)
+
+    # base_url for urljoin: always the canonical url, even for fixtures,
+    # so relative hrefs in the fixture resolve to the correct live domain.
+    base_url = url
 
     items: list[dict] = []
     for row in rows:
-        title = _extract_field(row, fields_cfg.get("title", {}), url)
-        date = _extract_field(row, fields_cfg.get("date", {}), url)
-        link = _extract_field(row, fields_cfg.get("link", {"attr": "href"}), url)
+        title = _extract_field(row, fields_cfg.get("title", {}), base_url)
+        date = _extract_field(row, fields_cfg.get("date", {}), base_url)
+        link = _extract_field(row, fields_cfg.get("link", {"attr": "href"}), base_url)
 
         if not title and not link:
-            continue  # skip completely empty rows (e.g. header rows selected by mistake)
+            continue  # skip header rows or spacers accidentally matched
 
         items.append(
             {
@@ -170,7 +211,7 @@ def _fetch_source(source: dict) -> tuple[list[dict], bool]:
             }
         )
 
-    # --- Liveness check ---
+    # --- Liveness check (same rule for live and fixture) ---
     if len(items) < min_items:
         log_event(
             SOURCE_FAILURE, CRITICAL, COMPONENT,
@@ -179,16 +220,24 @@ def _fetch_source(source: dict) -> tuple[list[dict], bool]:
                 f"threshold is {min_items}. "
                 "Zero items or a broken selector must not be treated as 'no new circulars'."
             ),
-            {"source": name, "parsed": len(items), "min_items": min_items, "url": url},
+            {
+                "source": name, "parsed": len(items),
+                "min_items": min_items, "source_ref": source_label,
+                "is_fixture": is_fixture,
+            },
         )
-        return items, False
+        return items, False, is_fixture
 
     log_event(
         PARSE_OK, INFO, COMPONENT,
-        f"Parsed {len(items)} items from {name}",
-        {"source": name, "item_count": len(items)},
+        f"Parsed {len(items)} items from {name}"
+        + (" [fixture]" if is_fixture else " [live]"),
+        {
+            "source": name, "item_count": len(items),
+            "source_ref": source_label, "is_fixture": is_fixture,
+        },
     )
-    return items, True
+    return items, True, is_fixture
 
 
 # ---------------------------------------------------------------------------
@@ -235,17 +284,19 @@ def _diff_and_commit(items: list[dict], slug: str) -> list[dict]:
 # Public API
 # ---------------------------------------------------------------------------
 
-def fetch_all(sources: list[dict]) -> tuple[list[dict], list[str], list[str]]:
+def fetch_all(sources: list[dict]) -> tuple[list[dict], list[str], list[str], set[str]]:
     """Fetch all enabled sources.
 
     Returns:
-        new_items      – flat list of items not seen in previous runs
-        healthy        – source names that passed liveness
-        failed         – source names that failed liveness (excluded from digest)
+        new_items       – flat list of items not seen in previous runs
+        healthy         – source names that passed liveness
+        failed          – source names that failed liveness (excluded from digest)
+        fixture_sources – subset of healthy that were read from local fixtures
     """
     all_new: list[dict] = []
     healthy: list[str] = []
     failed: list[str] = []
+    fixture_sources: set[str] = set()
 
     for source in sources:
         if not source.get("enabled", True):
@@ -254,14 +305,17 @@ def fetch_all(sources: list[dict]) -> tuple[list[dict], list[str], list[str]]:
         name = source["name"]
         slug = _slug_from_source(source)
 
-        items, liveness_ok = _fetch_source(source)
+        items, liveness_ok, is_fixture = _fetch_source(source)
 
         if not liveness_ok:
             failed.append(name)
             continue
 
         healthy.append(name)
+        if is_fixture:
+            fixture_sources.add(name)
+
         new_items = _diff_and_commit(items, slug)
         all_new.extend(new_items)
 
-    return all_new, healthy, failed
+    return all_new, healthy, failed, fixture_sources

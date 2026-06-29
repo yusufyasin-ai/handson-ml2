@@ -77,6 +77,7 @@ def _write_digest(
     unclassified_new: list[dict],
     healthy_sources: list[str],
     failed_sources: list[str],
+    fixture_sources: set[str],
     run_ts: datetime,
 ) -> Path:
     _OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -103,9 +104,18 @@ def _write_digest(
     if healthy_sources:
         lines.append(f"**Sources checked ({len(healthy_sources)}):**")
         for s in healthy_sources:
-            lines.append(f"- {s}")
+            tag = " _(fixture)_" if s in fixture_sources else " _(live)_"
+            lines.append(f"- {s}{tag}")
     else:
         lines.append("**Sources checked:** none")
+
+    if fixture_sources:
+        lines += [
+            "",
+            "> [!NOTE]",
+            f"> **{len(fixture_sources)} source(s) were read from local fixtures, not fetched live.**",
+            "> Results reflect the fixture snapshot, not the current state of the live site.",
+        ]
 
     lines.append("")
 
@@ -189,7 +199,8 @@ def _write_digest(
         "",
         f"_Run completed: {run_ts.isoformat()}_",
         (
-            f"_Sources checked: {len(healthy_sources)} | "
+            f"_Sources checked: {len(healthy_sources)} "
+            f"({len(fixture_sources)} fixture, {len(healthy_sources) - len(fixture_sources)} live) | "
             f"Sources failed: {len(failed_sources)} | "
             f"New items: {len(all_new)}_"
         ),
@@ -228,7 +239,7 @@ def run() -> None:
     )
 
     # Fetch, liveness check, diff
-    new_items, healthy_sources, failed_sources = fetch_module.fetch_all(enabled)
+    new_items, healthy_sources, failed_sources, fixture_sources = fetch_module.fetch_all(enabled)
 
     if failed_sources:
         log_event(
@@ -259,7 +270,7 @@ def run() -> None:
 
     # Write digest
     digest_path = _write_digest(
-        classified_items, unclassified_new, healthy_sources, failed_sources, run_ts
+        classified_items, unclassified_new, healthy_sources, failed_sources, fixture_sources, run_ts
     )
 
     log_event(

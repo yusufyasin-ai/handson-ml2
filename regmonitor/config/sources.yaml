@@ -6,6 +6,15 @@
 #   fields.date     – same; leave selector empty to use the row itself
 #   fields.link     – selector + attr (usually "href")
 #
+# Fixture support:
+#   fixture_path  – path to a local HTML file (relative to the regmonitor/ root).
+#                   When set, the file is read instead of making an HTTP request.
+#                   url is still used as the base URL for resolving relative links,
+#                   and is kept as the canonical reference even when a fixture is active.
+#                   The liveness check is identical regardless of source type —
+#                   a fixture that parses to zero items still fires SOURCE_FAILURE.
+#                   Omit or leave blank to fetch live.
+#
 # Liveness:
 #   min_items  – parse returning fewer than this triggers SOURCE_FAILURE/critical
 #                and the source is excluded from the digest. Prevents silent empty runs.
@@ -22,6 +31,7 @@ sources:
   - name: "CBUAE Rulebook Updates"
     slug: cbuae_rulebook
     url: "https://rulebook.centralbank.ae/en/view-revision-updates"
+    fixture_path: "fixtures/cbuae_rulebook.html"
     enabled: true
     tags: [uae, banking, rulebook]
     parser:
@@ -49,6 +59,7 @@ sources:
   - name: "CBB Circulars"
     slug: cbb_circulars
     url: "https://cbben.thomsonreuters.com/rulebook/list-circulars-0"
+    fixture_path: "fixtures/cbb_circulars.html"
     enabled: true
     tags: [bahrain, banking, circular]
     parser:
