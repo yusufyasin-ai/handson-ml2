@@ -83,10 +83,10 @@ Return ONLY a JSON object with this exact structure:
     {{
       "id": "OBL-1",
       "description": "<concrete obligation: what the FI must do>",
-      "addressed": <true or false>,
-      "confidence": <float 0.0–1.0 — your confidence that the addressed judgment is correct>,
-      "evidence": "<if addressed: verbatim phrase or section reference from the policy; if not: empty string>",
-      "gap": "<if not addressed: what is specifically absent from the policy; if addressed: empty string>"
+      "coverage": "<one of: covered | partial | not_covered>",
+      "confidence": <float 0.0–1.0 — your confidence that the coverage judgment is correct>,
+      "evidence": "<if covered or partial: verbatim phrase or section reference from the policy; if not_covered: empty string>",
+      "gap": "<if not_covered or partial: what is specifically absent or incomplete in the policy; if covered: empty string>"
     }}
   ]
 }}"""
@@ -135,9 +135,11 @@ def _parse_response(raw: str, item_link: str) -> list[dict] | None:
         )
         return None
 
+    VALID_COVERAGE = frozenset({"covered", "partial", "not_covered"})
+
     validated: list[dict] = []
     for i, obl in enumerate(obligations):
-        required = {"id", "description", "addressed", "confidence"}
+        required = {"id", "description", "coverage", "confidence"}
         missing = required - obl.keys()
         if missing:
             log_event(
@@ -149,11 +151,18 @@ def _parse_response(raw: str, item_link: str) -> list[dict] | None:
 
         try:
             obl["confidence"] = float(obl["confidence"])
-            obl["addressed"] = bool(obl["addressed"])
         except (TypeError, ValueError) as exc:
             log_event(
                 ERROR, WARN, COMPONENT,
-                f"Non-coercible type in obligation {obl.get('id', i)}: {exc}",
+                f"Non-coercible confidence in obligation {obl.get('id', i)}: {exc}",
+                {"obligation_id": obl.get("id"), "item_link": item_link},
+            )
+            continue
+
+        if obl.get("coverage") not in VALID_COVERAGE:
+            log_event(
+                ERROR, WARN, COMPONENT,
+                f"Invalid coverage value '{obl.get('coverage')}' in obligation {obl.get('id', i)} — skipped",
                 {"obligation_id": obl.get("id"), "item_link": item_link},
             )
             continue
@@ -239,29 +248,35 @@ def run_baseline(
                 f"Low confidence ({conf:.2f}) on obligation {obl['id']}: {obl['description'][:80]}",
                 {
                     "obligation_id": obl["id"],
-                    "addressed": obl["addressed"],
+                    "coverage": obl["coverage"],
                     "confidence": conf,
                     "item_link": item_link,
                 },
             )
 
-    # Divergence check: fire if enough obligations are unaddressed
-    unaddressed = [o for o in obligations if not o["addressed"]]
-    gap_ratio = len(unaddressed) / len(obligations) if obligations else 0.0
+    # Divergence check: weighted three-state gap ratio
+    # not_covered=1.0, partial=0.5, covered=0.0
+    n_not_covered = sum(1 for o in obligations if o["coverage"] == "not_covered")
+    n_partial     = sum(1 for o in obligations if o["coverage"] == "partial")
+    n_covered     = sum(1 for o in obligations if o["coverage"] == "covered")
+    gap_ratio = (n_not_covered + 0.5 * n_partial) / len(obligations) if obligations else 0.0
 
     if gap_ratio >= DIVERGENCE_THRESHOLD:
+        gap_ids = [o["id"] for o in obligations if o["coverage"] in ("not_covered", "partial")]
         log_event(
             BASELINE_DIVERGENCE, WARN, COMPONENT,
             (
-                f"Policy gap detected: {len(unaddressed)}/{len(obligations)} obligation(s) "
-                f"({gap_ratio:.0%}) unaddressed in: {item.get('title', '')[:80]}"
+                f"Policy gap detected: {n_not_covered} not_covered, {n_partial} partial "
+                f"(weighted ratio={gap_ratio:.0%}) in: {item.get('title', '')[:80]}"
             ),
             {
-                "unaddressed": len(unaddressed),
+                "not_covered": n_not_covered,
+                "partial": n_partial,
+                "covered": n_covered,
                 "total": len(obligations),
                 "gap_ratio": round(gap_ratio, 3),
                 "item_link": item_link,
-                "unaddressed_ids": [o["id"] for o in unaddressed],
+                "gap_ids": gap_ids,
             },
         )
 
@@ -278,8 +293,9 @@ def run_baseline(
         "obligations": obligations,
         "summary": {
             "total": len(obligations),
-            "addressed": len(obligations) - len(unaddressed),
-            "unaddressed": len(unaddressed),
+            "covered": n_covered,
+            "partial": n_partial,
+            "not_covered": n_not_covered,
             "gap_ratio": round(gap_ratio, 3),
             "low_confidence_count": sum(
                 1 for o in obligations if o["confidence"] < LOW_CONFIDENCE_THRESHOLD
@@ -289,7 +305,8 @@ def run_baseline(
 
     log_event(
         HANDOFF, INFO, COMPONENT,
-        f"Baseline complete — {len(obligations)} obligations, {len(unaddressed)} gap(s), ratio={gap_ratio:.0%}",
+        f"Baseline complete — {len(obligations)} obligations, ratio={gap_ratio:.0%} "
+        f"({n_covered} covered, {n_partial} partial, {n_not_covered} not_covered)",
         {"summary": result["summary"], "item_link": item_link},
     )
     return result
@@ -435,8 +452,9 @@ def main() -> None:
     s = result["summary"]
     print(
         f"\nObligations: {s['total']}  |  "
-        f"Addressed: {s['addressed']}  |  "
-        f"Gaps: {s['unaddressed']}  |  "
+        f"Covered: {s['covered']}  |  "
+        f"Partial: {s['partial']}  |  "
+        f"Not covered: {s['not_covered']}  |  "
         f"Gap ratio: {s['gap_ratio']:.0%}  |  "
         f"Low-confidence: {s['low_confidence_count']}",
         file=sys.stderr,
