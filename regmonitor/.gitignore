@@ -1,6 +1,5 @@
 # Runtime state — never commit
 state/
-output/
 
 # Python
 __pycache__/
