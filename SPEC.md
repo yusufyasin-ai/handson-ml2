@@ -187,7 +187,7 @@ Rule of thumb: **reads are never gated; only these three write-side features are
 
 Never gated: viewing any screen or record, rent logging for the free unit, expense/maintenance logging (minus receipt photo) for the free unit or property-level, deposits & move-out worksheet + its PDF, reminders/notifications, settings.
 
-> **Assumption flagged for review:** the brief lists "units 2–3" as Pro without detailing which *actions* that covers. This spec interprets it as *all new data entry targeted at units 2–3* (rows b and c above), while unit-1 and property-level entry stays free. Say the word if you want it narrower (e.g. only rent logging gated).
+> **Decision:** "units 2–3" as a Pro feature covers *all new data entry targeted at units 2–3* (rows b and c above), while unit-1 and property-level entry stays free. Rationale: the free tier reads as "a fully functional app for your first door," and gating only rent logging on extra units would leave a confusing, leaky boundary.
 
 ---
 
